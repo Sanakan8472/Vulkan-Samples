@@ -68,6 +68,12 @@ class TextureMipMapGeneration : public ApiVulkanSample
 	VkDescriptorSet       descriptor_set        = VK_NULL_HANDLE;
 	VkDescriptorSetLayout descriptor_set_layout = VK_NULL_HANDLE;
 
+	VkPipeline            compute_pipeline              = VK_NULL_HANDLE;
+	VkPipelineLayout      compute_pipeline_layout       = VK_NULL_HANDLE;
+	VkDescriptorSet       compute_descriptor_set[10]     = {VK_NULL_HANDLE};
+	VkDescriptorSetLayout compute_descriptor_set_layout = VK_NULL_HANDLE;
+	VkImageView           compute_view[10]               = {VK_NULL_HANDLE};
+
 	TextureMipMapGeneration();
 	~TextureMipMapGeneration();
 	virtual void request_gpu_features(vkb::PhysicalDevice &gpu) override;

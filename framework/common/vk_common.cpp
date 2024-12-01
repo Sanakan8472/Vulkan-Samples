@@ -464,6 +464,7 @@ VkAccessFlags getAccessFlags(VkImageLayout layout)
 		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
 			return VK_ACCESS_TRANSFER_WRITE_BIT;
 		case VK_IMAGE_LAYOUT_GENERAL:
+			return 0;
 			assert(false && "Don't know how to get a meaningful VkAccessFlags for VK_IMAGE_LAYOUT_GENERAL! Don't use it!");
 			return 0;
 		default:
@@ -494,6 +495,7 @@ VkPipelineStageFlags getPipelineStageFlags(VkImageLayout layout)
 		case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
 			return VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
 		case VK_IMAGE_LAYOUT_GENERAL:
+			return VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
 			assert(false && "Don't know how to get a meaningful VkPipelineStageFlags for VK_IMAGE_LAYOUT_GENERAL! Don't use it!");
 			return 0;
 		default:

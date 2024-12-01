@@ -28,6 +28,8 @@ add_sample_with_tags(
     SHADER_FILES_GLSL
         "texture_mipmap_generation/glsl/texture.vert"
         "texture_mipmap_generation/glsl/texture.frag"
+        "texture_mipmap_generation/glsl/texture.comp"
     SHADER_FILES_HLSL
         "texture_mipmap_generation/hlsl/texture.vert.hlsl"
-        "texture_mipmap_generation/hlsl/texture.frag.hlsl")
+        "texture_mipmap_generation/hlsl/texture.frag.hlsl"
+        "texture_mipmap_generation/hlsl/texture.comp.hlsl")

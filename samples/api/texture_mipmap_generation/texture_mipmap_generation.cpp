@@ -23,6 +23,7 @@
 
 TextureMipMapGeneration::TextureMipMapGeneration()
 {
+	set_shading_language(vkb::ShadingLanguage::HLSL);
 	zoom     = -2.5f;
 	rotation = {0.0f, 15.0f, 0.0f};
 	title    = "Texture MipMap generation";
@@ -38,6 +39,16 @@ TextureMipMapGeneration::~TextureMipMapGeneration()
 		for (auto sampler : samplers)
 		{
 			vkDestroySampler(get_device().get_handle(), sampler, nullptr);
+		}
+
+		{
+			vkDestroyPipeline(get_device().get_handle(), compute_pipeline, nullptr);
+			vkDestroyPipelineLayout(get_device().get_handle(), compute_pipeline_layout, nullptr);
+			vkDestroyDescriptorSetLayout(get_device().get_handle(), compute_descriptor_set_layout, nullptr);
+			for (auto view : compute_view)
+			{
+				vkDestroyImageView(get_device().get_handle(), view, nullptr);
+			}
 		}
 	}
 	destroy_texture(texture);
@@ -60,7 +71,7 @@ void TextureMipMapGeneration::request_gpu_features(vkb::PhysicalDevice &gpu)
 void TextureMipMapGeneration::load_texture_generate_mipmaps(std::string file_name)
 {
 	// ktx1 doesn't know whether the content is sRGB or linear, but most tools save in sRGB, so assume that.
-	VkFormat format = VK_FORMAT_R8G8B8A8_SRGB;
+	VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
 
 	ktxTexture    *ktx_texture;
 	KTX_error_code result;
@@ -127,13 +138,13 @@ void TextureMipMapGeneration::load_texture_generate_mipmaps(std::string file_nam
 	image_create_info.imageType         = VK_IMAGE_TYPE_2D;
 	image_create_info.format            = format;
 	image_create_info.mipLevels         = texture.mip_levels;
-	image_create_info.arrayLayers       = 1;
+	image_create_info.arrayLayers       = 6;
 	image_create_info.samples           = VK_SAMPLE_COUNT_1_BIT;
 	image_create_info.tiling            = VK_IMAGE_TILING_OPTIMAL;
 	image_create_info.sharingMode       = VK_SHARING_MODE_EXCLUSIVE;
 	image_create_info.initialLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
 	image_create_info.extent            = {texture.width, texture.height, 1};
-	image_create_info.usage             = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+	image_create_info.usage             = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT;
 	VK_CHECK(vkCreateImage(get_device().get_handle(), &image_create_info, nullptr, &texture.image));
 
 	vkGetImageMemoryRequirements(get_device().get_handle(), texture.image, &memory_requirements);
@@ -224,8 +235,14 @@ void TextureMipMapGeneration::load_texture_generate_mipmaps(std::string file_nam
 	vkb::image_layout_transition(blit_command,
 	                             texture.image,
 	                             VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-	                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+	                             VK_IMAGE_LAYOUT_GENERAL,
 	                             {VK_IMAGE_ASPECT_COLOR_BIT, 0, texture.mip_levels, 0, 1});
+
+	vkb::image_layout_transition(blit_command,
+	                             texture.image,
+	                             VK_IMAGE_LAYOUT_UNDEFINED,
+	                             VK_IMAGE_LAYOUT_GENERAL,
+	                             {VK_IMAGE_ASPECT_COLOR_BIT, 0, texture.mip_levels, 1, 5});
 
 	get_device().flush_command_buffer(blit_command, queue, true);
 	// ---------------------------------------------------------------
@@ -314,9 +331,52 @@ void TextureMipMapGeneration::build_command_buffers()
 
 	for (int32_t i = 0; i < draw_cmd_buffers.size(); ++i)
 	{
+		
+
 		render_pass_begin_info.framebuffer = framebuffers[i];
 
 		VK_CHECK(vkBeginCommandBuffer(draw_cmd_buffers[i], &command_buffer_begin_info));
+
+		{
+			uint32_t uiWidth  = texture.width;
+			uint32_t uiHeight = texture.height;
+			// Compute
+			for (uint32_t mip = 0; mip < texture.mip_levels; mip++)
+			{
+				vkCmdBindPipeline(draw_cmd_buffers[i], VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline);
+				vkCmdBindDescriptorSets(draw_cmd_buffers[i], VK_PIPELINE_BIND_POINT_COMPUTE, compute_pipeline_layout, 0, 1, &compute_descriptor_set[mip], 0, 0);
+
+				constexpr uint32_t uiThreadsX  = 8;
+				constexpr uint32_t uiThreadsY  = 8;
+				const uint32_t     uiDispatchX = (uiWidth + uiThreadsX - 1) / uiThreadsX;
+				const uint32_t     uiDispatchY = (uiHeight + uiThreadsY - 1) / uiThreadsY;
+				vkCmdDispatch(draw_cmd_buffers[i], uiDispatchX, uiDispatchY, 6);
+
+				uiWidth >>= 1;
+				uiHeight >>= 1;
+			}
+
+			VkImageSubresourceRange subresource_range = {};
+			subresource_range.aspectMask              = VK_IMAGE_ASPECT_COLOR_BIT;
+			subresource_range.baseMipLevel            = 0;
+			subresource_range.levelCount              = texture.mip_levels;
+			subresource_range.layerCount              = 6;
+
+			VkImageMemoryBarrier image_memory_barrier{};
+			image_memory_barrier.sType               = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+			image_memory_barrier.srcAccessMask       = VkAccessFlagBits::VK_ACCESS_SHADER_WRITE_BIT;
+			image_memory_barrier.dstAccessMask       = VkAccessFlagBits::VK_ACCESS_SHADER_READ_BIT;
+			image_memory_barrier.oldLayout           = VK_IMAGE_LAYOUT_GENERAL;
+			image_memory_barrier.newLayout           = VK_IMAGE_LAYOUT_GENERAL;
+			image_memory_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			image_memory_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			image_memory_barrier.image               = texture.image;
+			image_memory_barrier.subresourceRange    = subresource_range;
+
+			// Put barrier inside setup command buffer
+			vkCmdPipelineBarrier(draw_cmd_buffers[i], VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &image_memory_barrier);
+		}
+
 
 		vkCmdBeginRenderPass(draw_cmd_buffers[i], &render_pass_begin_info, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -361,13 +421,14 @@ void TextureMipMapGeneration::setup_descriptor_pool()
 	        vkb::initializers::descriptor_pool_size(VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1),
 	        vkb::initializers::descriptor_pool_size(VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1),
 	        vkb::initializers::descriptor_pool_size(VK_DESCRIPTOR_TYPE_SAMPLER, 3),
+	        vkb::initializers::descriptor_pool_size(VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 100)
 	    };
 
 	VkDescriptorPoolCreateInfo descriptor_pool_create_info =
 	    vkb::initializers::descriptor_pool_create_info(
 	        static_cast<uint32_t>(pool_sizes.size()),
 	        pool_sizes.data(),
-	        2);
+	        2 + 100);
 
 	VK_CHECK(vkCreateDescriptorPool(get_device().get_handle(), &descriptor_pool_create_info, nullptr, &descriptor_pool));
 }
@@ -407,6 +468,29 @@ void TextureMipMapGeneration::setup_descriptor_set_layout()
 	        1);
 
 	VK_CHECK(vkCreatePipelineLayout(get_device().get_handle(), &pipeline_layout_create_info, nullptr, &pipeline_layout));
+
+	{
+		VkDescriptorSetLayoutCreateInfo           compute_descriptor_layout_create_info{};
+		std::vector<VkDescriptorSetLayoutBinding> compute_set_layout_bindings{};
+		compute_set_layout_bindings = {
+		    vkb::initializers::descriptor_set_layout_binding(
+		        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+		        VK_SHADER_STAGE_COMPUTE_BIT,
+		        0)};
+
+		compute_descriptor_layout_create_info =
+		    vkb::initializers::descriptor_set_layout_create_info(
+		        compute_set_layout_bindings.data(),
+		        static_cast<uint32_t>(compute_set_layout_bindings.size()));
+		VK_CHECK(vkCreateDescriptorSetLayout(get_device().get_handle(), &compute_descriptor_layout_create_info, nullptr, &compute_descriptor_set_layout));
+
+		std::vector<VkDescriptorSetLayout> compute_set_layouts = {compute_descriptor_set_layout};
+		VkPipelineLayoutCreateInfo         compute_pipeline_layout_create_info =
+		    vkb::initializers::pipeline_layout_create_info(
+		        compute_set_layouts.data(),
+		        static_cast<uint32_t>(compute_set_layouts.size()));
+		VK_CHECK(vkCreatePipelineLayout(get_device().get_handle(), &compute_pipeline_layout_create_info, nullptr, &compute_pipeline_layout));
+	}
 }
 
 void TextureMipMapGeneration::setup_descriptor_set()
@@ -424,7 +508,7 @@ void TextureMipMapGeneration::setup_descriptor_set()
 	VkDescriptorImageInfo image_descriptor;
 	image_descriptor.imageView   = texture.view;
 	image_descriptor.sampler     = VK_NULL_HANDLE;
-	image_descriptor.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+	image_descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
 
 	std::vector<VkWriteDescriptorSet> write_descriptor_sets =
 	    {
@@ -445,7 +529,7 @@ void TextureMipMapGeneration::setup_descriptor_set()
 	std::vector<VkDescriptorImageInfo> sampler_descriptors;
 	for (auto i = 0; i < samplers.size(); i++)
 	{
-		sampler_descriptors.push_back({samplers[i], VK_NULL_HANDLE, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+		sampler_descriptors.push_back({samplers[i], VK_NULL_HANDLE, VK_IMAGE_LAYOUT_GENERAL});
 	}
 	VkWriteDescriptorSet write_descriptor_set{};
 	write_descriptor_set.sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -457,6 +541,45 @@ void TextureMipMapGeneration::setup_descriptor_set()
 	write_descriptor_set.dstArrayElement = 0;
 	write_descriptor_sets.push_back(write_descriptor_set);
 	vkUpdateDescriptorSets(get_device().get_handle(), static_cast<uint32_t>(write_descriptor_sets.size()), write_descriptor_sets.data(), 0, nullptr);
+
+	{
+		VkFormat format = VK_FORMAT_R8G8B8A8_UNORM;
+		for (size_t i = 0; i < texture.mip_levels; i++)
+		{
+			std::vector<VkDescriptorImageInfo> sampler_descriptors;
+			VkDescriptorSetAllocateInfo descriptor_set_alloc_info{};
+			descriptor_set_alloc_info =
+			    vkb::initializers::descriptor_set_allocate_info(
+			        descriptor_pool,
+			        &compute_descriptor_set_layout,
+			        1);
+			VK_CHECK(vkAllocateDescriptorSets(get_device().get_handle(), &descriptor_set_alloc_info, &compute_descriptor_set[i]));
+
+			VkImageViewCreateInfo view           = vkb::initializers::image_view_create_info();
+			view.image                           = texture.image;
+			view.viewType                        = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+			view.format                          = format;
+			view.components                      = {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
+			view.subresourceRange.aspectMask     = VK_IMAGE_ASPECT_COLOR_BIT;
+			view.subresourceRange.baseMipLevel   = i;
+			view.subresourceRange.baseArrayLayer = 0;
+			view.subresourceRange.layerCount     = 6;
+			view.subresourceRange.levelCount     = 1;
+			VK_CHECK(vkCreateImageView(get_device().get_handle(), &view, nullptr, &compute_view[i]));
+
+			VkDescriptorImageInfo image_descriptor{};
+			image_descriptor.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+			image_descriptor.imageView   = compute_view[i];
+
+			std::vector<VkWriteDescriptorSet> write_descriptor_sets = {
+			    vkb::initializers::write_descriptor_set(
+			        compute_descriptor_set[i],
+			        VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+			        0,
+			        &image_descriptor)};
+			vkUpdateDescriptorSets(get_device().get_handle(), static_cast<uint32_t>(write_descriptor_sets.size()), write_descriptor_sets.data(), 0, nullptr);
+		}
+	}
 }
 
 void TextureMipMapGeneration::prepare_pipelines()
@@ -541,6 +664,16 @@ void TextureMipMapGeneration::prepare_pipelines()
 	pipeline_create_info.pStages                      = shader_stages.data();
 
 	VK_CHECK(vkCreateGraphicsPipelines(get_device().get_handle(), pipeline_cache, 1, &pipeline_create_info, nullptr, &pipeline));
+
+	{
+		VkComputePipelineCreateInfo compute_pipeline_create_info = vkb::initializers::compute_pipeline_create_info(compute_pipeline_layout);
+
+		std::array<VkPipelineShaderStageCreateInfo, 2> shader_stages;
+
+		compute_pipeline_create_info.stage =  load_shader("texture_mipmap_generation", "texture.comp", VK_SHADER_STAGE_COMPUTE_BIT);
+
+		VK_CHECK(vkCreateComputePipelines(get_device().get_handle(), pipeline_cache, 1, &compute_pipeline_create_info, nullptr, &compute_pipeline));
+	}
 }
 
 void TextureMipMapGeneration::prepare_uniform_buffers()
